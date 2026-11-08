@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Хто така Марія Брицька</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Marck+Script&family=Oswald:wght@500;700&family=Playfair+Display:ital,wght@0,700;0,900;1,700;1,900&display=swap">
+<link rel="stylesheet" href="/style.css">
+<style>
+.qrbig{background:var(--paper);padding:14px;width:min(100%,300px);aspect-ratio:1;box-sizing:border-box}
+.qrbig svg{width:100%;height:100%;display:block}
+.joinurl{font-size:13px;color:var(--yellow);overflow-wrap:anywhere}
+.hostrow{display:grid;grid-template-columns:auto minmax(0,1fr);gap:20px;align-items:start}
+@media (max-width:760px){.hostrow{grid-template-columns:1fr}}
+.keybox{max-width:420px}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script src="/qrcode.js"></script>
+<script>
+const isHost = location.pathname.startsWith("/host");
+const T = 20000;
+const app = document.getElementById("app");
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const pad = n => String(n).padStart(2, "0");
+const store = {
+  get(k){ try{ return localStorage.getItem(k); }catch{ return null; } },
+  set(k,v){ try{ localStorage.setItem(k,v); }catch{} }
+};
+const SHAPES = [
+  '<svg viewBox="0 0 40 40" aria-hidden="true"><polygon points="20,4 37,35 3,35" fill="currentColor"/></svg>',
+  '<svg viewBox="0 0 40 40" aria-hidden="true"><polygon points="20,2 38,20 20,38 2,20" fill="currentColor"/></svg>',
+  '<svg viewBox="0 0 40 40" aria-hidden="true"><circle cx="20" cy="20" r="17" fill="currentColor"/></svg>',
+  '<svg viewBox="0 0 40 40" aria-hidden="true"><rect x="4" y="4" width="32" height="32" fill="currentColor"/></svg>'
+];
+const LOGO = '<div class="logo">The worst club<sup>↗</sup><br>&nbsp;&nbsp;in the world</div>';
+const d0 = new Date();
+const topbar = (extra = "") => `<div class="bar">${LOGO}<div class="meta"><span>→ ${pad(d0.getDate())}.${pad(d0.getMonth()+1)}</span>${extra}</div></div>`;
+const TITLE = `<span class="script">квіз</span><h1 class="serif">Хто така<span>Марія Брицька?</span></h1>`;
+function timerSvg(){
+  const C = 2*Math.PI*42;
+  return `<div class="timer" id="timer"><svg viewBox="0 0 100 100"><circle class="track" cx="50" cy="50" r="42"/><circle class="prog" cx="50" cy="50" r="42" stroke-dasharray="${C}" stroke-dashoffset="0"/></svg><div class="num">20</div></div>`;
+}
+function setTimer(rem){
+  const el = document.getElementById("timer"); if (!el) return;
+  const C = 2*Math.PI*42, f = Math.max(0, Math.min(1, rem/T));
+  el.querySelector(".prog").setAttribute("stroke-dashoffset", String(C*(1-f)));
+  el.querySelector(".num").textContent = Math.ceil(Math.max(0, rem)/1000);
+  el.classList.toggle("low", rem < 5000);
+}
+function qrSvg(text){
+  try { const q = qrcode(0, "M"); q.addData(text); q.make(); return q.createSvgTag({ cellSize: 8, margin: 0, scalable: true }); }
+  catch { return ""; }
+}
+
+let S = null, endAt = 0, connected = false;
+let myId = store.get("quiz-id"), myName = store.get("quiz-name") || "";
+let hostKey = new URLSearchParams(location.search).get("key") || store.get("quiz-host-key") || "";
+let lastSig = "";
+
+const status = () => `<div class="status ${connected ? "" : "off"}"><span class="dot"></span>${connected ? "На зв'язку" : "Підключаємось…"}</div>`;
+const chips = (list, meId) => list.map(p => `<span class="chip ${p.id === meId ? "me" : ""}">${esc(p.name)}</span>`).join("") || `<span class="note">Поки нікого. Скануй QR-код і заходь.</span>`;
+
+/* ---------- підключення ---------- */
+function connect(){
+  const es = new EventSource("/events");
+  es.onopen = () => { connected = true; };
+  es.onerror = () => { connected = false; };
+  es.onmessage = e => {
+    connected = true;
+    S = JSON.parse(e.data);
+    endAt = Date.now() + S.rem;
+    // гравець, якого сервер не знає (після перезапуску), заходить знову під тим самим ім'ям
+    if (!isHost && myId && myName && !S.players.some(p => p.id === myId)) { join(myName, true); return; }
+    render();
+  };
+}
+async function post(url, body, headers = {}){
+  const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body || {}) });
+  return r;
+}
+async function join(name, silent){
+  const r = await post("/api/join", { name, id: myId });
+  if (!r.ok) return;
+  const j = await r.json();
+  myId = j.id; myName = j.name;
+  store.set("quiz-id", myId); store.set("quiz-name", myName);
+  if (!silent) render();
+}
+async function answer(c){
+  const me = S.players.find(p => p.id === myId);
+  if (!me || me.answered) return;
+  me.answered = true; render();
+  await post("/api/answer", { id: myId, c });
+}
+async function hostCmd(cmd){
+  const r = await post("/api/host/" + cmd, {}, { "x-host-key": hostKey });
+  if (r.status === 403) { hostKey = ""; render(); }
+}
+
+/* ---------- рендер ---------- */
+function render(){
+  if (!S) { app.innerHTML = topbar() + `<div class="poster"><div class="title">${TITLE}</div><div class="hall"><div class="eyebrow">Відкриваємо зал…</div></div></div>`; return; }
+  const sig = isHost ? "h" : "p";
+  (isHost ? renderHost : renderPlayer)();
+}
+
+/* ----- ведучий ----- */
+function renderHost(){
+  if (!hostKey) {
+    app.innerHTML = topbar() + `<div class="poster"><div class="title">${TITLE}</div>
+      <form class="hall join keybox" id="kf"><label for="key">Ключ ведучого</label><input id="key" type="password" autocomplete="off"><div><button class="btn" type="submit">Увійти →</button></div></form></div>`;
+    document.getElementById("kf").onsubmit = e => { e.preventDefault(); hostKey = document.getElementById("key").value.trim(); store.set("quiz-host-key", hostKey); render(); };
+    return;
+  }
+  const ph = S.ph, ps = S.players, N = S.total;
+  if (ph === "lobby"){
+    const url = location.origin + "/";
+    app.innerHTML = topbar(`<span>${N} кадрів</span>`) + `
+    <div class="poster">
+      <div class="title">${TITLE}
+        <div class="facts"><div>${N} питань про Машу</div><div>20 секунд на відповідь</div><div>до 1000 балів: чим швидше, тим більше</div></div></div>
+      <div class="hall">
+        <div class="hostrow">
+          <div><div class="qrbig">${qrSvg(url)}</div></div>
+          <div style="display:flex;flex-direction:column;gap:10px;min-width:0">
+            <div class="eyebrow">Скануй і заходь</div>
+            <div class="joinurl">${esc(url)}</div>
+            <div class="eyebrow" style="margin-top:8px">У залі</div>
+            <div class="count">${ps.length}</div>
+          </div>
+        </div>
+        <div class="chips">${chips(ps)}</div>
+        <div class="row"><button class="btn" id="go" ${ps.length ? "" : "disabled"}>Почати показ →</button></div>
+        ${status()}
+      </div>
+    </div>`;
+    document.getElementById("go").onclick = () => hostCmd("start");
+    return;
+  }
+  if (ph === "q" || ph === "reveal"){
+    const rev = ph === "reveal", q = S.q;
+    const total = (S.cnt || []).reduce((a,b)=>a+b,0) || 1;
+    const answered = ps.filter(p => p.answered).length;
+    app.innerHTML = topbar(`<span>кадр ${pad(S.qi+1)}/${N}</span>`) + `
+      <div class="qhead">
+        <div class="frame">кадр<b>${pad(S.qi+1)} / ${N}</b></div>
+        ${rev ? `<div class="frame" style="text-align:right">правильна<b style="color:var(--yellow)">${esc(q.options[S.correct])}</b></div>` : timerSvg()}
+      </div>
+      <h2 class="serif qtext">${esc(q.text)}</h2>
+      <div class="answers">${q.options.map((a,i)=>`
+        <div class="ans c${i} ${rev ? (i===S.correct?"right":"dim") : ""}">${SHAPES[i]}<span class="lbl">${esc(a)}</span>
+          ${rev ? `<span class="cnt">${S.cnt[i]}</span><span class="fill" style="width:${Math.round(S.cnt[i]/total*100)}%"></span>` : ""}
+        </div>`).join("")}
+      </div>
+      <div class="foot">
+        <div class="stat"><small>відповіли</small>${answered} / ${ps.length}</div>
+        ${rev ? `<button class="btn yellow" id="act">Табло →</button>` : `<button class="btn ghost" id="act">Зупинити таймер</button>`}
+      </div>`;
+    document.getElementById("act").onclick = () => hostCmd(rev ? "board" : "reveal");
+    if (!rev) setTimer(endAt - Date.now());
+    return;
+  }
+  if (ph === "board"){
+    app.innerHTML = topbar(`<span>після кадру ${pad(S.qi+1)}</span>`) + `
+      <div class="row" style="align-items:flex-end;justify-content:space-between">
+        <h2 class="cond" style="font-size:clamp(56px,10vw,120px)">Табло</h2>
+        <span class="script" style="font-size:clamp(34px,5vw,56px)">${S.qi < N-1 ? "далі буде…" : "фінал близько"}</span>
+      </div>
+      <div class="board">${ps.slice(0,5).map((x,i)=>`
+        <div class="brow"><span class="rk">${i+1}</span><span class="nm">${esc(x.name)}</span><span class="dl">${x.d ? "+"+x.d : ""}${x.streak>=2 ? " · серія "+x.streak : ""}</span><span class="sc">${x.score}</span></div>`).join("")}
+      </div>
+      <div class="foot"><span class="eyebrow">${ps.length} у грі</span><button class="btn" id="act">${S.qi < N-1 ? "Наступне питання →" : "Фінал →"}</button></div>`;
+    document.getElementById("act").onclick = () => hostCmd("next");
+    return;
+  }
+  if (ph === "end"){
+    const pod = [ps[1], ps[0], ps[2]];
+    app.innerHTML = topbar(`<span>фінальні титри</span>`) + `
+      <h2 class="serif" style="font-size:clamp(48px,9vw,110px);color:var(--red)">Хто знає Машу найкраще</h2>
+      <div class="podium">${pod.map((x,i)=>{ const place=[2,1,3][i]; return x ? `<div class="pod p${place}"><div class="who">${esc(x.name)}</div><div class="pts">${x.score} балів</div><div class="block">${place}</div></div>` : `<div class="pod p${place}"></div>`; }).join("")}</div>
+      <div class="board">${ps.slice(3).map((x,i)=>`<div class="brow" style="background:var(--ink-2);color:var(--paper)"><span class="rk">${i+4}</span><span class="nm">${esc(x.name)}</span><span class="dl"></span><span class="sc">${x.score}</span></div>`).join("")}</div>
+      <div class="foot"><span class="script" style="font-size:40px">кінець фільму</span><button class="btn ghost" id="act">Нова гра</button></div>`;
+    document.getElementById("act").onclick = () => hostCmd("reset");
+  }
+}
+
+/* ----- гравець ----- */
+function renderPlayer(){
+  const me = S.players.find(p => p.id === myId);
+  if (!me){
+    const cur = document.getElementById("nick");
+    if (cur) { const c = document.getElementById("inroom"); if (c) c.textContent = "Уже в залі: " + S.players.length; return; }
+    app.innerHTML = topbar() + `
+    <div class="poster">
+      <div class="title">${TITLE}
+        <div class="facts"><div>${S.total} питань</div><div>20 секунд на відповідь</div><div>швидше = більше балів</div></div></div>
+      <form class="hall join" id="nf">
+        <label for="nick">Твоє ім'я в залі</label>
+        <input id="nick" maxlength="18" autocomplete="off" placeholder="Інна" value="${esc(myName)}">
+        <div><button class="btn" type="submit">Зайти →</button></div>
+        <div class="eyebrow" id="inroom">Уже в залі: ${S.players.length}</div>
+        ${status()}
+      </form>
+    </div>`;
+    document.getElementById("nf").onsubmit = e => { e.preventDefault(); const v = document.getElementById("nick").value.trim(); if (v) join(v); };
+    return;
+  }
+  const ph = S.ph, N = S.total;
+  const rank = S.players.findIndex(p => p.id === myId) + 1;
+  if (ph === "lobby"){
+    app.innerHTML = topbar() + `
+    <div class="poster">
+      <div class="title"><span class="script">${esc(me.name)},</span><h1 class="serif">ти в залі.<span>Чекаємо старту</span></h1>
+        <div class="facts"><div>${N} питань про Машу</div><div>20 секунд на відповідь</div><div>швидше = більше балів</div></div></div>
+      <div class="hall"><div class="eyebrow">Глядачі: ${S.players.length}</div><div class="chips">${chips(S.players, myId)}</div>${status()}
+        <div><button class="btn ghost" id="rn">Змінити ім'я</button></div></div>
+    </div>`;
+    document.getElementById("rn").onclick = () => { myId = null; store.set("quiz-id", ""); render(); };
+    return;
+  }
+  if (ph === "q"){
+    const q = S.q;
+    if (me.answered){
+      app.innerHTML = topbar(`<span>кадр ${pad(S.qi+1)}/${N}</span>`) + `<div class="verdict wait"><h2 class="cond">Відповідь прийнята</h2><p>Чекаємо, поки відповідять інші. Скільки балів, дізнаєшся за мить.</p><div class="stat"><small>відповіли</small>${S.players.filter(p=>p.answered).length} / ${S.players.length}</div></div>`;
+      return;
+    }
+    app.innerHTML = topbar(`<span>кадр ${pad(S.qi+1)}/${N}</span>`) + `
+      <div class="qhead"><div class="frame">кадр<b>${pad(S.qi+1)} / ${N}</b></div>${timerSvg()}</div>
+      <h2 class="serif qtext small">${esc(q.text)}</h2>
+      <div class="answers">${q.options.map((a,i)=>`<button class="ans c${i}" data-c="${i}">${SHAPES[i]}<span class="lbl">${esc(a)}</span></button>`).join("")}</div>`;
+    setTimer(endAt - Date.now());
+    app.querySelectorAll("button.ans").forEach(b => b.onclick = () => answer(+b.dataset.c));
+    return;
+  }
+  if (ph === "reveal"){
+    const ok = me.ok;
+    app.innerHTML = topbar(`<span>кадр ${pad(S.qi+1)}/${N}</span>`) + `
+      <div class="verdict ${ok ? "ok" : "bad"}">
+        <h2 class="serif">${ok ? "Влучно!" : (me.answered ? "Мимо" : "Не встиг")}</h2>
+        <div class="pts">+${me.d}</div>
+        ${ok && me.streak >= 2 ? `<span class="pill">серія ${me.streak} поспіль</span>` : ""}
+        ${ok ? "" : `<p>Правильна відповідь: <b>${esc(S.q.options[S.correct])}</b></p>`}
+        <p>Ти на ${rank} місці · ${me.score} балів</p>
+      </div>`;
+    return;
+  }
+  const end = ph === "end";
+  app.innerHTML = topbar(end ? `<span>фінальні титри</span>` : `<span>після кадру ${pad(S.qi+1)}</span>`) + `
+    ${end ? `<span class="script" style="font-size:56px">кінець фільму</span>` : ""}
+    <h2 class="cond" style="font-size:clamp(48px,14vw,100px)">${end ? "Твоє місце: " + rank : "Табло"}</h2>
+    <p class="eyebrow" style="margin:0">${me.score} балів${!end ? " · ти на " + rank + " місці" : ""}</p>
+    <div class="board">${S.players.slice(0,5).map((x,i)=>`<div class="brow ${x.id===myId?"me":""}"><span class="rk">${i+1}</span><span class="nm">${esc(x.name)}</span><span class="dl"></span><span class="sc">${x.score}</span></div>`).join("")}</div>
+    ${end ? "" : `<p class="note">Наступне питання з'явиться, коли ведучий натисне «далі».</p>`}`;
+}
+
+setInterval(() => { if (S && S.ph === "q") setTimer(endAt - Date.now()); }, 200);
+render();
+connect();
+</script>
+</body>
+</html>
